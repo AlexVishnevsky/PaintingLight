@@ -1,0 +1,284 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Карта пожеж України</title>
+<style>
+:root{--bg:#0b0d12;--panel:#141821;--line:#262c38;--txt:#d8dce5;--mut:#7d8597;--acc:#ff8a2a}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--txt);font:14px/1.4 system-ui,sans-serif}
+header{padding:10px 16px;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid var(--line)}
+header h1{font-size:16px;margin:0 12px 0 0}
+button,select,input{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 10px;font:inherit}
+button{cursor:pointer}button:hover{border-color:var(--acc)}
+.tabs button.on{border-color:var(--acc);color:var(--acc)}
+#src{padding:10px 16px;border-bottom:1px solid var(--line);display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+#src .pane{display:none;flex-wrap:wrap;gap:8px;align-items:center;width:100%}
+#src .pane.on{display:flex}
+small,.mut{color:var(--mut)}
+#stage{position:relative;margin:0 auto;max-width:1400px;padding:8px 16px}
+#map{width:100%;display:block;background:#06080c;border-radius:8px;touch-action:none}
+#info{position:absolute;left:28px;top:18px;pointer-events:none;font-family:ui-monospace,monospace;text-shadow:0 0 4px #000}
+#info .d{font-size:22px;color:#f3c58a}
+#tl{max-width:1400px;margin:0 auto;padding:0 16px 16px}
+#tlwrap{position:relative;height:90px;background:var(--panel);border-radius:8px;overflow:hidden;touch-action:none;user-select:none}
+#hist{position:absolute;inset:0;width:100%;height:100%}
+#sel{position:absolute;top:0;bottom:0;background:rgba(255,138,42,.13);border-left:2px solid var(--acc);border-right:2px solid var(--acc);cursor:grab}
+.h{position:absolute;top:0;bottom:0;width:18px;cursor:ew-resize}
+.h::after{content:"";position:absolute;left:6px;top:30px;width:6px;height:30px;border-radius:3px;background:var(--acc)}
+#hl{left:-10px}#hr{right:-10px}
+#ctrl{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:8px}
+#ctrl label{display:flex;gap:6px;align-items:center}
+#log{font-size:12px;color:var(--mut);white-space:pre-wrap;max-height:4.5em;overflow:auto;width:100%}
+</style>
+</head>
+<body>
+<header>
+  <h1>🔥 Пожежі України — накладання кадрів</h1>
+  <div class="tabs">
+    <button data-p="api" class="on">NASA FIRMS API</button>
+    <button data-p="csv">CSV-архів</button>
+    <button data-p="vid">З відео</button>
+  </div>
+</header>
+
+<div id="src">
+  <div class="pane on" id="p-api">
+    <input id="key" placeholder="FIRMS MAP_KEY" size="34">
+    <select id="sensor">
+      <option value="VIIRS_SNPP">VIIRS S-NPP (375 м)</option>
+      <option value="VIIRS_NOAA20">VIIRS NOAA-20 (375 м)</option>
+      <option value="MODIS">MODIS (1 км)</option>
+    </select>
+    <input type="date" id="d0" value="2022-02-24"> → <input type="date" id="d1">
+    <button id="go">Завантажити</button>
+    <small>Ключ безкоштовний: <a style="color:var(--acc)" href="https://firms.modaps.eosdis.nasa.gov/api/map_key/" target="_blank">firms.modaps.eosdis.nasa.gov/api/map_key</a>. Кеш зберігається в браузері.</small>
+  </div>
+  <div class="pane" id="p-csv">
+    <input type="file" id="csv" accept=".csv,.txt" multiple>
+    <small>FIRMS → <a style="color:var(--acc)" href="https://firms.modaps.eosdis.nasa.gov/download/" target="_blank">Archive Download</a> → країна Ukraine, VIIRS, CSV. Можна кілька файлів одразу.</small>
+  </div>
+  <div class="pane" id="p-vid">
+    <input type="file" id="vf" accept="video/*">
+    crop x<input id="cx" type="number" value="290" style="width:70px">
+    y<input id="cy" type="number" value="685" style="width:70px">
+    w<input id="cw" type="number" value="790" style="width:70px">
+    h<input id="ch" type="number" value="480" style="width:70px">
+    кадрів<input id="cn" type="number" value="240" style="width:70px">
+    дати <input type="date" id="v0" value="2022-02-24"> → <input type="date" id="v1" value="2026-08-24">
+    <button id="vgo">Нарізати</button>
+  </div>
+  <div id="log"></div>
+</div>
+
+<div id="stage">
+  <canvas id="map"></canvas>
+  <div id="info"><div class="d" id="range">—</div><div id="cnt"></div></div>
+</div>
+
+<div id="tl">
+  <div id="tlwrap"><canvas id="hist"></canvas>
+    <div id="sel"><div class="h" id="hl"></div><div class="h" id="hr"></div></div>
+  </div>
+  <div id="ctrl">
+    <button id="play">▶ Програти вікно</button>
+    <label>Швидкість <input id="spd" type="range" min="1" max="30" value="6"></label>
+    <label>Яскравість <input id="gain" type="range" min="1" max="100" value="35"></label>
+    <label>Розмір точки <input id="rad" type="range" min="1" max="6" value="1"></label>
+    <label>Режим <select id="mode">
+      <option value="light">Тільки світло</option>
+      <option value="safe">Безпечні зони (без виявлень)</option>
+    </select></label>
+    <label><input type="checkbox" id="noind" checked> Без промислових джерел</label>
+    <button id="all">Весь період</button>
+    <button id="png">PNG</button>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/topojson/3.0.2/topojson.min.js"></script>
+<script>
+// ---------- геометрія карти ----------
+const B={x0:21.9,x1:40.4,y0:44.1,y1:52.5};           // межі області (lon/lat)
+const K=Math.cos(48.3*Math.PI/180);
+const W=1400,H=Math.round(W*(B.y1-B.y0)/((B.x1-B.x0)*K));
+const map=document.getElementById('map');map.width=W;map.height=H;
+const ctx=map.getContext('2d');
+const px=lon=>(lon-B.x0)/(B.x1-B.x0)*W, py=lat=>(B.y1-lat)/(B.y1-B.y0)*H;
+const $=id=>document.getElementById(id);
+const log=s=>{$('log').textContent=s};
+$('d1').value=new Date(Date.now()-864e5).toISOString().slice(0,10);
+try{$('key').value=localStorage.getItem('firmsKey')||''}catch(e){}
+
+// кордони країн з world-atlas
+let borders=null,uaShape=null;
+fetch('https://cdn.jsdelivr.net/npm/world-atlas@2.0.2/countries-50m.json').then(r=>r.json()).then(t=>{
+  const fc=topojson.feature(t,t.objects.countries);
+  borders=new Path2D();uaShape=new Path2D();
+  const add=(p,g)=>{const polys=g.type==='Polygon'?[g.coordinates]:g.coordinates;
+    for(const poly of polys)for(const ring of poly){ring.forEach(([x,y],i)=>i?p.lineTo(px(x),py(y)):p.moveTo(px(x),py(y)));p.closePath()}};
+  for(const f of fc.features){add(borders,f.geometry);if(f.id==='804')add(uaShape,f.geometry)}
+  render();
+}).catch(()=>{});
+const CITIES=[["Київ",30.52,50.45],["Харків",36.23,49.99],["Львів",24.03,49.84],["Одеса",30.73,46.48],["Дніпро",35.05,48.46],["Запоріжжя",35.14,47.84],["Херсон",32.62,46.64],["Миколаїв",31.99,46.97],["Донецьк",37.8,48.0],["Луганськ",39.3,48.57],["Маріуполь",37.55,47.1],["Севастополь",33.52,44.6],["Суми",34.8,50.91],["Чернігів",31.29,51.5]];
+
+// ---------- дані ----------
+// DATA: {kind:'pts', t0:ms, days:N, idx:[Uint32Array per day] (пікселі), ind:[Uint8Array прапор промислових]}
+//    або {kind:'vid', t0, t1, frames:[ImageBitmap], dates:[ms]}
+let DATA=null,A=0,Bi=0; // діапазон вибраних індексів [A,Bi]
+
+function buildPts(rows,t0,t1){ // rows: [lon,lat,dayIndex,industrial]
+  const days=Math.round((t1-t0)/864e5)+1, buckets=Array.from({length:days},()=>[]);
+  for(const r of rows){if(r[2]<0||r[2]>=days)continue;
+    const x=px(r[0])|0,y=py(r[1])|0;if(x<0||y<0||x>=W||y>=H)continue;
+    buckets[r[2]].push((y*W+x)|(r[3]?0x80000000:0))}
+  DATA={kind:'pts',t0,days,idx:buckets.map(b=>Uint32Array.from(b))};
+  A=0;Bi=days-1;afterLoad();
+}
+
+// CSV FIRMS
+function parseCSV(text,rows,state){
+  const lines=text.split(/\r?\n/);const h=lines[0].split(',');
+  const iLat=h.indexOf('latitude'),iLon=h.indexOf('longitude'),iD=h.indexOf('acq_date'),iT=h.indexOf('type');
+  if(iLat<0||iD<0)return 0;let n=0;
+  for(let i=1;i<lines.length;i++){const c=lines[i].split(',');if(c.length<3)continue;
+    const t=Date.parse(c[iD]);if(isNaN(t))continue;
+    rows.push([+c[iLon],+c[iLat],t,iT>=0&&c[iT]==='2']);n++;
+    if(t<state.min)state.min=t;if(t>state.max)state.max=t}
+  return n;
+}
+function finishRows(rows,st){const t0=st.min;for(const r of rows)r[2]=Math.round((r[2]-t0)/864e5);buildPts(rows,t0,st.max)}
+
+$('csv').onchange=async e=>{const rows=[],st={min:Infinity,max:-Infinity};let n=0;
+  for(const f of e.target.files){log('Читаю '+f.name+'…');n+=parseCSV(await f.text(),rows,st)}
+  if(!n)return log('Не знайшов колонок latitude/longitude/acq_date');
+  log(n.toLocaleString()+' виявлень завантажено');finishRows(rows,st)};
+
+// FIRMS API, шматками по 10 днів, з кешем в IndexedDB
+const idb=new Promise(res=>{try{const r=indexedDB.open('firms',1);r.onupgradeneeded=()=>r.result.createObjectStore('c');r.onsuccess=()=>res(r.result);r.onerror=()=>res(null)}catch(e){res(null)}});
+async function cget(k){const db=await idb;if(!db)return null;return new Promise(r=>{const q=db.transaction('c').objectStore('c').get(k);q.onsuccess=()=>r(q.result||null);q.onerror=()=>r(null)})}
+async function cset(k,v){const db=await idb;if(!db)return;db.transaction('c','readwrite').objectStore('c').put(v,k)}
+$('go').onclick=async()=>{
+  const key=$('key').value.trim();if(!key)return log('Вкажіть MAP_KEY');try{localStorage.setItem('firmsKey',key)}catch(e){}
+  const s=$('sensor').value,t0=Date.parse($('d0').value),t1=Date.parse($('d1').value);
+  const recent=Date.now()-60*864e5, bbox=[B.x0,B.y0,B.x1,B.y1].join(',');
+  const rows=[],st={min:t0,max:t1};
+  for(let t=t0;t<=t1;t+=10*864e5){
+    const date=new Date(t).toISOString().slice(0,10),n=Math.min(10,Math.round((t1-t)/864e5)+1);
+    const srcs=t+n*864e5<recent?[s+'_SP',s+'_NRT']:[s+'_NRT',s+'_SP'];
+    let txt=null;
+    for(const src of srcs){const ck=src+bbox+date+n;txt=await cget(ck);
+      if(txt==null){try{const r=await fetch(`https://firms.modaps.eosdis.nasa.gov/api/area/csv/${key}/${src}/${bbox}/${n}/${date}`);
+          txt=await r.text();if(!r.ok||!txt.startsWith('latitude')){if(/invalid|key/i.test(txt))return log('Помилка ключа: '+txt.slice(0,120));txt=null;continue}
+          if(t+n*864e5<recent)cset(ck,txt)}catch(e){return log('Запит заблоковано ('+e.message+'). Якщо CORS — скачайте CSV-архів і використайте вкладку «CSV-архів».')}}
+      if(txt&&txt.split('\n').length>2)break}
+    if(txt)parseCSV(txt,rows,{min:Infinity,max:-Infinity});
+    log(`${date}: ${rows.length.toLocaleString()} виявлень…`);
+  }
+  for(const r of rows)r[2]=Math.round((r[2]-t0)/864e5);buildPts(rows,t0,t1);
+  log(rows.length.toLocaleString()+' виявлень завантажено');
+};
+
+// Відео: нарізаємо кадри вікна карти
+$('vgo').onclick=async()=>{const f=$('vf').files[0];if(!f)return log('Оберіть відеофайл');
+  const v=document.createElement('video');v.muted=true;v.src=URL.createObjectURL(f);
+  await new Promise(r=>v.onloadedmetadata=r);
+  const [cx,cy,cw,ch,N]=['cx','cy','cw','ch','cn'].map(i=>+$(i).value);
+  const t0=Date.parse($('v0').value),t1=Date.parse($('v1').value),frames=[],dates=[];
+  for(let i=0;i<N;i++){v.currentTime=v.duration*(i+.5)/N;await new Promise(r=>v.onseeked=r);
+    frames.push(await createImageBitmap(v,cx,cy,cw,ch));dates.push(t0+(t1-t0)*i/(N-1));log(`Кадр ${i+1}/${N}`)}
+  DATA={kind:'vid',frames,dates,days:N};A=0;Bi=N-1;afterLoad();log(N+' кадрів нарізано');
+};
+
+// ---------- рендер ----------
+const acc=new Float32Array(W*H),img=ctx.createImageData(W,H);
+const LUT=new Uint8ClampedArray(256*3);for(let i=0;i<256;i++){const t=i/255; // чорний→червоний→помаранчевий→жовто-білий
+  LUT[i*3]=Math.min(255,t*3*255);LUT[i*3+1]=Math.min(255,Math.max(0,(t-.3)*1.6*255));LUT[i*3+2]=Math.min(255,Math.max(0,(t-.7)*3.3*255))}
+function base(){ctx.fillStyle='#06080c';ctx.fillRect(0,0,W,H);
+  if(uaShape){ctx.fillStyle='#10141c';ctx.fill(uaShape,'evenodd')}}
+function overlay(){if(borders){ctx.strokeStyle='rgba(140,155,180,.35)';ctx.lineWidth=1;ctx.stroke(borders)}
+  ctx.font='12px ui-monospace,monospace';for(const [n,x,y] of CITIES){ctx.fillStyle='rgba(200,210,230,.7)';ctx.fillRect(px(x)-1.5,py(y)-1.5,3,3);ctx.fillText(n,px(x)+5,py(y)+4)}}
+function dateOf(i){return DATA.kind==='vid'?DATA.dates[i]:DATA.t0+i*864e5}
+const fmt=t=>new Date(t).toISOString().slice(0,10);
+function render(){
+  base();
+  if(!DATA){overlay();ctx.fillStyle='#7d8597';ctx.font='20px system-ui';ctx.fillText('Завантажте дані вгорі ↑',W/2-110,H/2);return}
+  const mode=$('mode').value,gain=+$('gain').value;
+  if(DATA.kind==='vid'){
+    ctx.save();ctx.globalCompositeOperation='lighten';
+    for(let i=A;i<=Bi;i++)ctx.drawImage(DATA.frames[i],0,0,W,H);ctx.restore();
+    if(mode==='safe'){ctx.globalCompositeOperation='difference';ctx.fillStyle='#fff';ctx.fillRect(0,0,W,H);ctx.globalCompositeOperation='source-over'}
+    $('cnt').textContent=(Bi-A+1)+' кадрів';
+  }else{
+    acc.fill(0);let n=0;const noind=$('noind').checked,r=+$('rad').value-1;
+    for(let d=A;d<=Bi;d++){const a=DATA.idx[d];for(let k=0;k<a.length;k++){let p=a[k];if(p&0x80000000){if(noind)continue;p&=0x7fffffff}
+      n++;if(!r){acc[p]++;continue}const x=p%W,y=(p/W)|0;
+      for(let dy=-r;dy<=r;dy++)for(let dx=-r;dx<=r;dx++){const xx=x+dx,yy=y+dy;if(xx>=0&&yy>=0&&xx<W&&yy<H)acc[yy*W+xx]+=1/(1+dx*dx+dy*dy)}}}
+    const g=gain/12,D=img.data;
+    const bg=ctx.getImageData(0,0,W,H).data;
+    for(let i=0;i<W*H;i++){const v=acc[i],o=i*4;
+      if(mode==='safe'){ // зелене там, де нічого не було; червоне — де було
+        if(v>0){D[o]=180;D[o+1]=30;D[o+2]=30}else{D[o]=bg[o];D[o+1]=bg[o+1]+40;D[o+2]=bg[o+2]+10}D[o+3]=255;continue}
+      if(v<=0){D[o]=bg[o];D[o+1]=bg[o+1];D[o+2]=bg[o+2];D[o+3]=255;continue}
+      const l=Math.min(255,(Math.log1p(v*g)/Math.log1p(g*40))*255+40)|0;
+      D[o]=Math.max(bg[o],LUT[l*3]);D[o+1]=Math.max(bg[o+1],LUT[l*3+1]);D[o+2]=Math.max(bg[o+2],LUT[l*3+2]);D[o+3]=255}
+    ctx.putImageData(img,0,0);
+    if(mode==='safe'&&uaShape){ctx.save();ctx.globalCompositeOperation='destination-in';ctx.fill(uaShape,'evenodd');ctx.restore();
+      ctx.globalCompositeOperation='destination-over';ctx.fillStyle='#06080c';ctx.fillRect(0,0,W,H);ctx.globalCompositeOperation='source-over'}
+    $('cnt').textContent=n.toLocaleString()+' виявлень · '+(Bi-A+1)+' дн.';
+  }
+  overlay();
+  $('range').textContent=fmt(dateOf(A))+' → '+fmt(dateOf(Bi));
+}
+let raf=0;const req=()=>{if(!raf)raf=requestAnimationFrame(()=>{raf=0;render()})};
+['gain','rad','mode','noind'].forEach(i=>$(i).oninput=req);
+
+// ---------- таймлайн ----------
+const hist=$('hist'),hctx=hist.getContext('2d'),wrap=$('tlwrap'),sel=$('sel');
+let counts=[];
+function afterLoad(){
+  counts=DATA.kind==='vid'?DATA.frames.map((f,i)=>1):DATA.idx.map(a=>a.length);
+  if(DATA.kind==='vid'){ // яскравість кадру як «активність»
+    const c=new OffscreenCanvas(80,50),cc=c.getContext('2d');
+    counts=DATA.frames.map(f=>{cc.drawImage(f,0,0,80,50);const d=cc.getImageData(0,0,80,50).data;let s=0;for(let i=0;i<d.length;i+=4)s+=Math.max(0,d[i]-d[i+2]-20);return s})}
+  drawHist();placeSel();req();
+}
+function drawHist(){const w=hist.width=wrap.clientWidth*devicePixelRatio,h=hist.height=wrap.clientHeight*devicePixelRatio;
+  hctx.clearRect(0,0,w,h);if(!counts.length)return;const mx=Math.max(...counts)||1,N=counts.length;
+  hctx.fillStyle='#ff8a2a';for(let i=0;i<N;i++){const bh=Math.sqrt(counts[i]/mx)*(h-18);hctx.fillRect(i/N*w,h-bh,Math.max(1,w/N),bh)}
+  hctx.fillStyle='#7d8597';hctx.font=11*devicePixelRatio+'px ui-monospace';
+  let ly=-1;for(let i=0;i<N;i++){const y=new Date(dateOf(i)).getUTCFullYear();if(y!==ly){ly=y;const x=i/N*w;hctx.fillRect(x,0,1,h);hctx.fillText(y,x+3,12*devicePixelRatio)}}}
+function placeSel(){if(!DATA)return;const N=DATA.days;sel.style.left=(A/N*100)+'%';sel.style.width=((Bi-A+1)/N*100)+'%'}
+function idxAt(cx){const r=wrap.getBoundingClientRect();return Math.max(0,Math.min(DATA.days-1,Math.floor((cx-r.left)/r.width*DATA.days)))}
+let drag=null;
+wrap.addEventListener('pointerdown',e=>{if(!DATA)return;wrap.setPointerCapture(e.pointerId);const i=idxAt(e.clientX);
+  if(e.target.id==='hl')drag={t:'l'};else if(e.target.id==='hr')drag={t:'r'};
+  else if(e.target===sel)drag={t:'m',o:i,a:A,b:Bi};else{drag={t:'new',o:i};A=Bi=i}
+  placeSel();req()});
+wrap.addEventListener('pointermove',e=>{if(!drag)return;const i=idxAt(e.clientX),N=DATA.days;
+  if(drag.t==='l')A=Math.min(i,Bi);else if(drag.t==='r')Bi=Math.max(i,A);
+  else if(drag.t==='new'){A=Math.min(i,drag.o);Bi=Math.max(i,drag.o)}
+  else{let d=i-drag.o;d=Math.max(-drag.a,Math.min(N-1-drag.b,d));A=drag.a+d;Bi=drag.b+d}
+  placeSel();req()});
+wrap.addEventListener('pointerup',()=>drag=null);
+addEventListener('resize',drawHist);
+
+let playing=null;
+$('play').onclick=()=>{if(playing){clearInterval(playing);playing=null;$('play').textContent='▶ Програти вікно';return}
+  if(!DATA)return;$('play').textContent='⏸ Пауза';
+  playing=setInterval(()=>{const s=Math.max(1,Math.round(+$('spd').value*DATA.days/1600));
+    if(Bi+s>=DATA.days){const w=Bi-A;A=0;Bi=w}else{A+=s;Bi+=s}placeSel();req()},50)};
+$('all').onclick=()=>{if(!DATA)return;A=0;Bi=DATA.days-1;placeSel();req()};
+$('png').onclick=()=>{const a=document.createElement('a');a.download='fires_'+$('range').textContent.replace(/ → /,'_')+'.png';a.href=map.toDataURL();a.click()};
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>{document.querySelectorAll('.tabs button,.pane').forEach(x=>x.classList.remove('on'));b.classList.add('on');$('p-'+b.dataset.p).classList.add('on')});
+
+// демо-дані, щоб одразу було що крутити
+(function demo(){const t0=Date.parse('2022-02-24'),t1=Date.parse('2026-08-24'),days=(t1-t0)/864e5,rows=[];
+  let s=7;const rnd=()=>(s=(s*16807)%2147483647)/2147483647;
+  for(let d=0;d<=days;d++){const front=37.6-Math.max(0,1.2-d/200)*1.5+Math.sin(d/90)*.15;const n=40+60*rnd()*(1+Math.sin(d/30));
+    for(let k=0;k<n;k++){const lat=46.6+rnd()*3.5;rows.push([front+(lat-48)*-.35+(rnd()-.5)*.6,lat,d,false])}
+    for(let k=0;k<5;k++)rows.push([22.5+rnd()*15,45.5+rnd()*6,d,false])}
+  buildPts(rows,t0,t1);log('Показано синтетичні ДЕМО-дані. Завантажте справжні з FIRMS.')})();
+</script>
+</body>
+</html>
