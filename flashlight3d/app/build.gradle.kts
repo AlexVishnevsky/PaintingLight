@@ -53,4 +53,12 @@ dependencies {
     implementation("com.google.android.filament:gltfio-android:$filament")
     implementation("com.google.android.filament:filament-utils-android:$filament")
     implementation("androidx.core:core-ktx:1.15.0")
+    implementation("androidx.activity:activity-ktx:1.9.3")
+
+    val camerax = "1.4.1"
+    implementation("androidx.camera:camera-core:$camerax")
+    implementation("androidx.camera:camera-camera2:$camerax")
+    implementation("androidx.camera:camera-lifecycle:$camerax")
+    // Bundled model: face tracking works offline, without Play Services downloads.
+    implementation("com.google.mlkit:face-detection:16.1.7")
 }
