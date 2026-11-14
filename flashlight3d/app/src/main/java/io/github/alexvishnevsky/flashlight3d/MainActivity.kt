@@ -31,7 +31,6 @@ import androidx.core.view.WindowInsetsControllerCompat
 import com.google.android.filament.Camera
 import com.google.android.filament.Engine
 import com.google.android.filament.EntityManager
-import com.google.android.filament.LightManager
 import com.google.android.filament.MaterialInstance
 import com.google.android.filament.Renderer
 import com.google.android.filament.Scene
@@ -50,15 +49,14 @@ import java.nio.ByteBuffer
 import kotlin.math.abs
 import kotlin.math.exp
 import kotlin.math.max
-import kotlin.math.sqrt
 
 /**
  * Everything is laid out in "device space": metres, origin at the centre of the
  * screen, x right, y up, z out of the glass towards the viewer. The screen is a
- * window; the box and the flashlight live behind it at their true physical size
- * and are drawn through an off-axis frustum whose apex is the viewer's eye.
- * Device space is then rotated into the world by the gyro, which is what keeps
- * the reflected environment still while the phone turns.
+ * window onto a black void; the flashlight touches the glass with its lens end
+ * and leans away into the depth, and is drawn through an off-axis frustum whose
+ * apex is the viewer's eye. Device space is then rotated into the world by the
+ * gyro, which is what keeps the reflected environment still while the phone turns.
  */
 class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.FrameCallback {
 
@@ -69,9 +67,11 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
             Utils.init()
         }
 
-        private const val BOX_DEPTH = 0.11f
-        private const val FLASHLIGHT_Z = -0.055f
-        private const val FLASHLIGHT_SCREEN_FRACTION = 0.68f
+        /** Share of the screen height the flashlight covers, seen from the default eye. */
+        private const val FLASHLIGHT_SCREEN_FRACTION = 0.85f
+        /** How far the tail leans back into the screen, degrees from the glass. */
+        private const val LEAN_DEGREES = 35f
+        private const val FACE_LOST_MS = 400L
         private const val DEFAULT_EYE_Z = 0.38f
         private const val NEAR = 0.02
         private const val FAR = 20.0
@@ -95,13 +95,10 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
     private lateinit var materialProvider: UbershaderProvider
     private lateinit var assetLoader: AssetLoader
     private lateinit var flashlight: FilamentAsset
-    private lateinit var room: FilamentAsset
     private var flashlightEntities: Set<Int> = emptySet()
     private var glass: MaterialInstance? = null
-    private var beam = 0
-    private val modelCenter = FloatArray(3)
-    private var modelScale = 1f
-    private var lensY = 0f
+    /** Flashlight placement in device space; fixed once the model is measured. */
+    private val flashlightLocal = FloatArray(16)
 
     private var frontCamera: FrontCamera? = null
     private var cameraPausedForTorch = false
@@ -118,7 +115,6 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
     private val localMatrix = FloatArray(16)
     private val modelMatrix = FloatArray(16)
     private val cameraMatrix = FloatArray(16)
-    private val vec = FloatArray(8)
 
     // Smoothed eye position in device space.
     private var eyeX = 0f
@@ -126,14 +122,14 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
     private var eyeZ = DEFAULT_EYE_Z
     private var lastFrameNanos = 0L
 
-    // Drag state: spin around the flashlight's long axis and tilt towards the viewer.
-    private var spin = 35f
-    private var tilt = 24f
-    private var lastX = 0f
-    private var lastY = 0f
+    // Where the eye is assumed to stay, in world space, while no face is visible.
+    // Rotating the phone then still produces parallax, from the gyro alone.
+    private val eyeAnchor = FloatArray(3)
+    private var eyeAnchorValid = false
+    private var everTracked = false
+
     private var downX = 0f
     private var downY = 0f
-    private var moved = false
 
     private var torchOn = false
     private var torchCameraId: String? = null
@@ -205,20 +201,11 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
         environment = EnvironmentMap(engine, scene)
         environment.fillStudio()
         environment.publish()
+        // Pure black, so AMOLED pixels around the flashlight stay off. Dithering
+        // would otherwise sprinkle 1-bit noise over the black.
         skybox = Skybox.Builder().color(0f, 0f, 0f, 1f).build(engine)
         scene.skybox = skybox
-
-        // The beam of the virtual flashlight; only in the scene while it is on.
-        beam = EntityManager.get().create()
-        LightManager.Builder(LightManager.Type.SPOT)
-            .color(1f, 0.93f, 0.8f)
-            .intensityCandela(0.05f) // the walls are only centimetres away
-            .falloff(0.8f)
-            .spotLightCone(0.2f, 0.6f)
-            .castShadows(false)
-            .position(0f, 0f, 0f)
-            .direction(0f, 1f, 0f)
-            .build(engine, beam)
+        view.dithering = View.Dithering.NONE
     }
 
     private fun loadScene() {
@@ -235,23 +222,8 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
         scene.addEntities(flashlight.entities)
         flashlightEntities = flashlight.entities.toSet()
 
-        val tile = halfWidth / 3f
-        room = checkNotNull(
-            assetLoader.createAsset(BoxRoom.buildGlb(halfWidth, halfHeight, BOX_DEPTH, tile)),
-        ) { "room could not be built" }
-        resourceLoader.loadResources(room)
-        room.releaseSourceData()
-        scene.addEntities(room.entities)
         resourceLoader.destroy()
-
-        val box = flashlight.boundingBox
-        val center = box.center
-        val half = box.halfExtent
-        modelCenter[0] = center[0]
-        modelCenter[1] = center[1]
-        modelCenter[2] = center[2]
-        modelScale = FLASHLIGHT_SCREEN_FRACTION * halfHeight / half[1]
-        lensY = center[1] - half[1] // the lens is the -Y end of the model
+        layoutFlashlight()
 
         glass = flashlight.instance.materialInstances.firstOrNull {
             it.name == "Glass" && it.material.hasParameter("emissiveFactor")
@@ -304,8 +276,8 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
 
         val dt = if (lastFrameNanos == 0L) 0.016f else (frameTimeNanos - lastFrameNanos) * 1e-9f
         lastFrameNanos = frameTimeNanos
-        trackEye(dt)
         synchronized(deviceMatrix) { System.arraycopy(deviceMatrix, 0, deviceSnapshot, 0, 16) }
+        trackEye(dt)
 
         // Off-axis frustum through the screen rectangle, apex at the eye.
         Matrix.setIdentityM(localMatrix, 0)
@@ -320,20 +292,9 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
             NEAR, FAR,
         )
 
+        Matrix.multiplyMM(modelMatrix, 0, deviceSnapshot, 0, flashlightLocal, 0)
         val tm = engine.transformManager
-        tm.setTransform(tm.getInstance(room.root), deviceSnapshot)
-
-        Matrix.setIdentityM(localMatrix, 0)
-        Matrix.translateM(localMatrix, 0, 0f, 0f, FLASHLIGHT_Z)
-        Matrix.rotateM(localMatrix, 0, tilt, 1f, 0f, 0f)
-        Matrix.rotateM(localMatrix, 0, 180f, 0f, 0f, 1f) // lens (model -Y) points up
-        Matrix.rotateM(localMatrix, 0, spin, 0f, 1f, 0f)
-        Matrix.scaleM(localMatrix, 0, modelScale, modelScale, modelScale)
-        Matrix.translateM(localMatrix, 0, -modelCenter[0], -modelCenter[1], -modelCenter[2])
-        Matrix.multiplyMM(modelMatrix, 0, deviceSnapshot, 0, localMatrix, 0)
         tm.setTransform(tm.getInstance(flashlight.root), modelMatrix)
-
-        if (torchOn) aimBeam()
 
         if (renderer.beginFrame(chain, frameTimeNanos)) {
             renderer.render(view)
@@ -342,14 +303,47 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
     }
 
     private fun trackEye(dt: Float) {
-        var targetX = 0f
-        var targetY = 0f
-        var targetZ = DEFAULT_EYE_Z
+        val d = deviceSnapshot
+        var targetX: Float
+        var targetY: Float
+        var targetZ: Float
         val tracker = frontCamera
-        if (tracker != null && SystemClock.uptimeMillis() - tracker.eyeTimeMs < 700) {
+        if (tracker != null && SystemClock.uptimeMillis() - tracker.eyeTimeMs < FACE_LOST_MS) {
             targetX = tracker.eyeX
             targetY = tracker.eyeY
             targetZ = tracker.eyeZ
+            // Remember where the eye is in the world, for when the face is lost.
+            eyeAnchor[0] = d[0] * targetX + d[4] * targetY + d[8] * targetZ
+            eyeAnchor[1] = d[1] * targetX + d[5] * targetY + d[9] * targetZ
+            eyeAnchor[2] = d[2] * targetX + d[6] * targetY + d[10] * targetZ
+            eyeAnchorValid = true
+            everTracked = true
+        } else {
+            // No face: assume the head stays where it was last seen and let the
+            // gyro move the phone around it.
+            val restX = d[8] * DEFAULT_EYE_Z
+            val restY = d[9] * DEFAULT_EYE_Z
+            val restZ = d[10] * DEFAULT_EYE_Z
+            if (!eyeAnchorValid) {
+                eyeAnchor[0] = restX
+                eyeAnchor[1] = restY
+                eyeAnchor[2] = restZ
+                eyeAnchorValid = true
+            } else if (!everTracked) {
+                // Never had a face (no camera): there is no real position to hold
+                // on to, so drift back to straight-on instead of staying skewed.
+                val r = 1f - exp(-dt / 4f)
+                eyeAnchor[0] += (restX - eyeAnchor[0]) * r
+                eyeAnchor[1] += (restY - eyeAnchor[1]) * r
+                eyeAnchor[2] += (restZ - eyeAnchor[2]) * r
+            }
+            targetX = d[0] * eyeAnchor[0] + d[1] * eyeAnchor[1] + d[2] * eyeAnchor[2]
+            targetY = d[4] * eyeAnchor[0] + d[5] * eyeAnchor[1] + d[6] * eyeAnchor[2]
+            targetZ = d[8] * eyeAnchor[0] + d[9] * eyeAnchor[1] + d[10] * eyeAnchor[2]
+            // Keep the eye in front of the glass however far the phone is turned.
+            targetZ = max(0.15f, targetZ)
+            targetX = targetX.coerceIn(-0.5f, 0.5f)
+            targetY = targetY.coerceIn(-0.5f, 0.5f)
         }
         // Sideways motion must feel immediate; distance is noisier, so it gets
         // a slower filter.
@@ -360,31 +354,70 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
         eyeZ = max(0.12f, eyeZ + (targetZ - eyeZ) * az)
     }
 
-    private fun aimBeam() {
-        // Lens position and direction, from model space to the world.
-        vec[0] = modelCenter[0]
-        vec[1] = lensY
-        vec[2] = modelCenter[2]
-        vec[3] = 1f
-        Matrix.multiplyMV(vec, 4, modelMatrix, 0, vec, 0)
-        val px = vec[4]
-        val py = vec[5]
-        val pz = vec[6]
-        vec[0] = 0f
-        vec[1] = -1f
-        vec[2] = 0f
-        vec[3] = 0f
-        Matrix.multiplyMV(vec, 4, modelMatrix, 0, vec, 0)
-        val len = sqrt(vec[4] * vec[4] + vec[5] * vec[5] + vec[6] * vec[6])
-        if (len < 1e-6f) return
-        val dx = vec[4] / len
-        val dy = vec[5] / len
-        val dz = vec[6] / len
-        val lm = engine.lightManager
-        val instance = lm.getInstance(beam)
-        // Start just in front of the glass so the light does not hit the model itself.
-        lm.setPosition(instance, px + dx * 0.003f, py + dy * 0.003f, pz + dz * 0.003f)
-        lm.setDirection(instance, dx, dy, dz)
+    /**
+     * Places the flashlight: upright and centred, lens end touching the glass,
+     * tail leaning back into the depth, sized so that from the default eye it
+     * covers [FLASHLIGHT_SCREEN_FRACTION] of the screen height.
+     */
+    private fun layoutFlashlight() {
+        val box = flashlight.boundingBox
+        val c = box.center
+        val e = box.halfExtent
+        val corner = FloatArray(4)
+        val p = FloatArray(4)
+        val m = FloatArray(16)
+        val ys = FloatArray(8)
+        val zs = FloatArray(8)
+        val wanted = FLASHLIGHT_SCREEN_FRACTION * 2f * halfHeight
+        var lo = 0.05f
+        var hi = 5f
+        var dy = 0f
+        var dz = 0f
+        repeat(30) {
+            val scale = (lo + hi) * 0.5f
+            // Orientation and size only; the offset is solved for below.
+            Matrix.setIdentityM(m, 0)
+            Matrix.rotateM(m, 0, LEAN_DEGREES, 1f, 0f, 0f)
+            Matrix.rotateM(m, 0, 180f, 0f, 0f, 1f) // lens (model -Y) points up
+            Matrix.scaleM(m, 0, scale, scale, scale)
+            Matrix.translateM(m, 0, -c[0], -c[1], -c[2])
+
+            var maxZ = -Float.MAX_VALUE
+            for (i in 0 until 8) {
+                corner[0] = c[0] + if (i and 1 == 0) -e[0] else e[0]
+                corner[1] = c[1] + if (i and 2 == 0) -e[1] else e[1]
+                corner[2] = c[2] + if (i and 4 == 0) -e[2] else e[2]
+                corner[3] = 1f
+                Matrix.multiplyMV(p, 0, m, 0, corner, 0)
+                ys[i] = p[1]
+                zs[i] = p[2]
+                maxZ = max(maxZ, p[2])
+            }
+            // Push back until the nearest point just touches the glass.
+            dz = -maxZ - 0.0005f
+
+            // Height on the screen plane as seen from the default eye, and the
+            // vertical shift that centres it. Perspective makes the shift act
+            // differently on near and far corners, hence the few refinements.
+            var top = 0f
+            var bottom = 0f
+            dy = 0f
+            repeat(6) {
+                top = -Float.MAX_VALUE
+                bottom = Float.MAX_VALUE
+                for (i in 0 until 8) {
+                    val y = (ys[i] + dy) * DEFAULT_EYE_Z / (DEFAULT_EYE_Z - (zs[i] + dz))
+                    top = max(top, y)
+                    bottom = minOf(bottom, y)
+                }
+                dy -= (top + bottom) * 0.5f
+            }
+            if (top - bottom > wanted) hi = scale else lo = scale
+
+            Matrix.setIdentityM(localMatrix, 0)
+            Matrix.translateM(localMatrix, 0, 0f, dy, dz)
+            Matrix.multiplyMM(flashlightLocal, 0, localMatrix, 0, m, 0)
+        }
     }
 
     // ---- device orientation ----------------------------------------------
@@ -412,33 +445,22 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
-    // ---- touch: drag to turn the flashlight, tap it to switch it on -------
+    // ---- touch: tap the flashlight to switch it on ----------------------
 
     private fun onSurfaceTouch(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 downX = event.x
                 downY = event.y
-                lastX = event.x
-                lastY = event.y
-                moved = false
             }
-            MotionEvent.ACTION_MOVE -> {
+            MotionEvent.ACTION_UP -> {
                 val slop = ViewConfiguration.get(this).scaledTouchSlop
-                if (abs(event.x - downX) > slop || abs(event.y - downY) > slop) moved = true
-                if (moved) {
-                    val density = resources.displayMetrics.density
-                    spin += (event.x - lastX) / density * 0.6f
-                    tilt = (tilt + (event.y - lastY) / density * 0.4f).coerceIn(-90f, 90f)
-                }
-                lastX = event.x
-                lastY = event.y
-            }
-            MotionEvent.ACTION_UP -> if (!moved) {
-                // Ask Filament which object is under the finger; only a tap on
-                // the flashlight itself counts. Picking uses a bottom-left origin.
-                view.pick(event.x.toInt(), surfaceView.height - event.y.toInt(), mainHandler) {
-                    if (it.renderable in flashlightEntities) setTorch(!torchOn)
+                if (abs(event.x - downX) <= slop && abs(event.y - downY) <= slop) {
+                    // Ask Filament which object is under the finger; only a tap on
+                    // the flashlight itself counts. Picking uses a bottom-left origin.
+                    view.pick(event.x.toInt(), surfaceView.height - event.y.toInt(), mainHandler) {
+                        if (it.renderable in flashlightEntities) setTorch(!torchOn)
+                    }
                 }
             }
         }
@@ -463,7 +485,6 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
     private fun setTorch(on: Boolean) {
         torchOn = on
         applyTorchLook()
-        if (on) scene.addEntity(beam) else scene.removeEntity(beam)
 
         val id = torchCameraId ?: return
         val manager = getSystemService(Context.CAMERA_SERVICE) as CameraManager
@@ -532,13 +553,10 @@ class MainActivity : ComponentActivity(), SensorEventListener, Choreographer.Fra
         uiHelper.detach()
 
         assetLoader.destroyAsset(flashlight)
-        assetLoader.destroyAsset(room)
         assetLoader.destroy()
         materialProvider.destroyMaterials()
         materialProvider.destroy()
 
-        engine.destroyEntity(beam)
-        EntityManager.get().destroy(beam)
         engine.destroySkybox(skybox)
         environment.destroy()
         engine.destroyRenderer(renderer)
