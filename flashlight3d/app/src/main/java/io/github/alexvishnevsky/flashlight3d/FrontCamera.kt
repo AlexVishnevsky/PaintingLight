@@ -41,8 +41,7 @@ class FrontCamera(
     /** Copies the current device orientation (column-major 4x4) into the array. */
     private val readOrientation: (FloatArray) -> Unit,
     /** Where the camera lens sits relative to the screen centre, metres. */
-    private val cameraOffsetX: Float,
-    private val cameraOffsetY: Float,
+    private val cameraOffset: () -> Pair<Float, Float>,
 ) {
     private companion object {
         const val TAG = "Flashlight3D"
@@ -57,6 +56,7 @@ class FrontCamera(
     @Volatile var eyeY = 0f; private set
     @Volatile var eyeZ = 0f; private set
     @Volatile var eyeTimeMs = 0L; private set
+    @Volatile var framesProcessed = 0; private set
 
     private val executor = Executors.newSingleThreadExecutor()
     private val detector = FaceDetection.getClient(
@@ -150,7 +150,7 @@ class FrontCamera(
             val rotation = proxy.imageInfo.rotationDegrees
             readOrientation(orientation)
 
-            val focalPx = (image.width * 0.5 / tan(fovLongSide * 0.5)).toFloat()
+            val focalPx = (image.width * 0.5 / tan(fovLongSide * 0.5)).toFloat() / Settings[P.CAM_FOV]
             val sideways = rotation == 90 || rotation == 270
             val uprightW = if (sideways) image.height else image.width
             val uprightH = if (sideways) image.width else image.height
@@ -160,6 +160,8 @@ class FrontCamera(
                 locateEyes(it, focalPx, uprightW * 0.5f, uprightH * 0.5f)
             }
 
+            framesProcessed++
+            if (!Settings.on(P.LIVE)) return
             val planes = image.planes
             environment.splat(
                 CameraFrame(
@@ -198,8 +200,9 @@ class FrontCamera(
         val z = distance.coerceIn(0.15f, 1.5f)
         // The front camera looks back at the viewer, so in its upright image
         // right is the device's left and down is the device's down.
-        eyeX = cameraOffsetX - (u - cx) * z / focalPx
-        eyeY = cameraOffsetY - (v - cy) * z / focalPx
+        val (offsetX, offsetY) = cameraOffset()
+        eyeX = offsetX - (u - cx) * z / focalPx
+        eyeY = offsetY - (v - cy) * z / focalPx
         eyeZ = z
         eyeTimeMs = SystemClock.uptimeMillis()
     }

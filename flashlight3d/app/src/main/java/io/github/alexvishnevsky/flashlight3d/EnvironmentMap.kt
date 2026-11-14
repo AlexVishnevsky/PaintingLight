@@ -72,9 +72,20 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
     private val lobeWeights: Array<FloatArray>
 
     /** sRGB byte -> linear, with clipped highlights pushed into HDR range. */
-    private val toneLut = FloatArray(256) {
-        val lin = (it / 255.0).pow(2.2)
-        (2.0 * lin * (1.0 + 7.0 * lin.pow(3.0))).toFloat()
+    private val toneLut = FloatArray(256)
+    private var lutGain = -1f
+    private var lutBoost = -1f
+
+    private fun refreshToneLut() {
+        val gain = Settings[P.GAIN]
+        val boost = Settings[P.BOOST]
+        if (gain == lutGain && boost == lutBoost) return
+        lutGain = gain
+        lutBoost = boost
+        for (i in 0 until 256) {
+            val lin = (i / 255.0).pow(2.2)
+            toneLut[i] = (gain * lin * (1.0 + boost * lin.pow(3.0))).toFloat()
+        }
     }
 
     private class UploadSet {
@@ -129,6 +140,7 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
     // ---- filling -----------------------------------------------------------
 
     /** Procedural studio: used until (or instead of) live camera data. */
+    @Synchronized
     fun fillStudio() {
         val rgb = FloatArray(3)
         for (i in 0 until TEXELS) {
@@ -147,7 +159,13 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
      * camera looks along device +z; in the upright image, right is device -x
      * and down is device -y.
      */
+    @Synchronized
     fun splat(frame: CameraFrame, worldFromDevice: FloatArray) {
+        if (!Settings.on(P.LIVE)) return
+        refreshToneLut()
+        val mirrorX = if (Settings.on(P.MIRROR_X)) -1f else 1f
+        val mirrorY = if (Settings.on(P.MIRROR_Y)) -1f else 1f
+        val blend = Settings[P.BLEND]
         if (!live) {
             // First live frame: forget the studio.
             known.fill(false)
@@ -180,8 +198,8 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
             if (z < 0.25f) continue
             val x = m[0] * dx + m[1] * dy + m[2] * dz
             val y = m[4] * dx + m[5] * dy + m[6] * dz
-            val uu = cx - f * x / z
-            val vv = cy - f * y / z
+            val uu = cx - mirrorX * f * x / z
+            val vv = cy - mirrorY * f * y / z
             if (uu < 0f || vv < 0f || uu >= uprightW || vv >= uprightH) continue
             val bx: Int
             val by: Int
@@ -213,7 +231,7 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
                 accum[o + 1] = g
                 accum[o + 2] = b
             } else {
-                val a = 0.5f * min(1f, edge)
+                val a = blend * min(1f, edge)
                 accum[o] += (r - accum[o]) * a
                 accum[o + 1] += (g - accum[o + 1]) * a
                 accum[o + 2] += (b - accum[o + 2]) * a
@@ -221,7 +239,7 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
         }
         if (count > 0) {
             // Directions nobody has looked at yet get a dimmed average of the room.
-            val k = 0.5f / count
+            val k = Settings[P.FILL] / count
             fill[0] += (sumR * k - fill[0]) * 0.2f
             fill[1] += (sumG * k - fill[1]) * 0.2f
             fill[2] += (sumB * k - fill[2]) * 0.2f
@@ -229,6 +247,7 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
     }
 
     /** Builds the mip chain and hands it to the main thread. Skips if both buffers are in flight. */
+    @Synchronized
     fun publish() {
         val set = synchronized(sets) {
             sets.firstOrNull { !it.busy }?.also { it.busy = true }
@@ -322,7 +341,7 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
         val next = IndirectLight.Builder()
             .reflections(texture)
             .irradiance(1, set.ambient)
-            .intensity(1f)
+            .intensity(Settings[P.IBL])
             .build(engine)
         scene.indirectLight = next
         indirectLight?.let { engine.destroyIndirectLight(it) }
