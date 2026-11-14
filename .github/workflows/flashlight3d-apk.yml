@@ -1,0 +1,54 @@
+name: Flashlight 3D APK
+
+on:
+  push:
+    paths:
+      - "flashlight3d/**"
+      - ".github/workflows/flashlight3d-apk.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flashlight3d-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: flashlight3d
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Rename APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk "$RUNNER_TEMP/flashlight3d.apk"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: flashlight3d-apk
+          path: ${{ runner.temp }}/flashlight3d.apk
+
+      # A single rolling release, so the newest APK always has the same
+      # download link and can be opened straight from a phone.
+      - name: Publish rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete flashlight3d-latest --cleanup-tag --yes || true
+          gh release create flashlight3d-latest "$RUNNER_TEMP/flashlight3d.apk" \
+            --target "$GITHUB_SHA" \
+            --title "Flashlight 3D (build ${GITHUB_RUN_NUMBER})" \
+            --notes "Automatic build of ${GITHUB_SHA} from ${GITHUB_REF_NAME}."
