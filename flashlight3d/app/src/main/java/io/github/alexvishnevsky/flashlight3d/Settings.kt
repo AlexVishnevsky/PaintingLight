@@ -65,6 +65,12 @@ object Settings {
     fun load(context: Context) {
         val p = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         prefs = p
+        // A new build deserves a full attempt: forget the compatibility level
+        // an older, broken build may have fallen back to.
+        val build = context.packageManager.getPackageInfo(context.packageName, 0).versionCode
+        if (p.getInt("build", 0) != build) {
+            p.edit().putInt("build", build).remove(P.SAFE.name).apply()
+        }
         for (param in P.entries) {
             values[param.ordinal] = p.getFloat(param.name, param.def).coerceIn(param.min, param.max)
         }
@@ -83,7 +89,8 @@ object Settings {
 
     fun reset() {
         for (param in P.entries) values[param.ordinal] = param.def
-        prefs?.edit()?.clear()?.apply()
+        val build = prefs?.getInt("build", 0) ?: 0
+        prefs?.edit()?.clear()?.putInt("build", build)?.apply()
         version++
     }
 

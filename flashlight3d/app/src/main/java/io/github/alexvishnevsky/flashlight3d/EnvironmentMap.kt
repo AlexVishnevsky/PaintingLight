@@ -327,16 +327,19 @@ class EnvironmentMap(private val engine: Engine, private val scene: Scene) {
             val size = SIZE shr level
             val buffer = set.buffers[level]
             buffer.clear()
-            val descriptor = if (level == LEVELS - 1) {
-                // Filament reads the buffers on its own thread; the set is free
-                // again once the last one has been consumed.
-                Texture.PixelBufferDescriptor(
-                    buffer, Texture.Format.RGB, Texture.Type.FLOAT, 1, 0, 0, 0, mainHandler,
-                ) { synchronized(sets) { set.busy = false } }
-            } else {
-                Texture.PixelBufferDescriptor(buffer, Texture.Format.RGB, Texture.Type.FLOAT)
-            }
-            texture.setImage(engine, level, 0, 0, 0, size, size, 6, descriptor)
+            // Filament reads the buffers on its own thread; the set is free
+            // again once the last one has been consumed.
+            val last = level == LEVELS - 1
+            val descriptor = Texture.PixelBufferDescriptor(
+                buffer, Texture.Format.RGB, Texture.Type.FLOAT, 1, 0, 0, 0, mainHandler,
+            ) { if (last) synchronized(sets) { set.busy = false } }
+            // The cube map overload is deliberate. The generic 3D overload of
+            // Filament's Java binding shifts the height by the mip level a second
+            // time when sizing the buffer, so every level above 0 aborts with a
+            // "buffer overflow" precondition.
+            val faceBytes = size * size * 3 * 4
+            @Suppress("DEPRECATION")
+            texture.setImage(engine, level, descriptor, IntArray(6) { it * faceBytes })
         }
         val next = IndirectLight.Builder()
             .reflections(texture)
